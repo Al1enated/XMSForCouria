@@ -1,18 +1,12 @@
-//
-//  WhatsAppForCouria.mm
-//  WhatsAppForCouria
-//
-//  Created by Qusic on 8/3/13.
-//  Copyright (c) 2013 Qusic. All rights reserved.
-//
-
 #import <Foundation/Foundation.h>
 #import <substrate.h>
+#import <CaptainHook.h>
+#import <Couria/Couria.h>
 #import <sys/sysctl.h>
-#import "CaptainHook/CaptainHook.h"
-#import "Couria.h"
+#import <sys/socket.h>
+#import <netinet/in.h>
 
-#define WhatsAppForCouriaIdentifier "me.qusic.whatsappforcouria"
+#define WhatsAppForCouriaIdentifier @"me.qusic.whatsappforcouria"
 #define SpringBoardIdentifier @"com.apple.springboard"
 #define BackBoardIdentifier @"com.apple.backboardd"
 #define WhatsAppIdentifier @"net.whatsapp.WhatsApp"
@@ -22,8 +16,9 @@
 #define UserIDKey @"UserID"
 #define MessageKey @"Message"
 #define KeepAliveKey @"KeepAlive"
+#define SocketPortKey @"Temp"
 
-typedef NS_ENUM(SInt32, CouriaWhatsAppServiceMessageID) {
+typedef NS_ENUM(SInt8, CouriaWhatsAppServiceMessageID) {
     GetNickname,
     GetAvatar,
     GetMessages,
@@ -40,10 +35,8 @@ typedef NS_ENUM(SInt32, CouriaWhatsAppServiceMessageID) {
 @property(assign) BOOL outgoing;
 @end
 
-@interface CouriaWhatsAppDataSource : NSObject <CouriaDataSource>
-@end
-
-@interface CouriaWhatsAppDelegate : NSObject <CouriaDelegate>
+@interface CouriaWhatsAppHandler : NSObject <CouriaDataSource, CouriaDelegate>
++ (instancetype)sharedInstance;
 @end
 
 @interface UIApplication (Private)
@@ -95,6 +88,7 @@ typedef NS_OPTIONS(NSUInteger, ProcessAssertionFlags)
 @end
 
 @interface BKWorkspaceServer : NSObject
+- (void)applicationDidActivate:(BKApplication *)application withInfo:(id)info;
 - (void)applicationDidExit:(BKApplication *)application withInfo:(id)info;
 @end
 
@@ -105,6 +99,10 @@ typedef NS_OPTIONS(NSUInteger, ProcessAssertionFlags)
 @interface WAPhone : NSObject
 @property(retain, nonatomic) WAContact *contact;
 @property(retain, nonatomic) NSString* whatsAppID;
+@end
+
+@interface WAFavorite : NSObject
+@property (nonatomic, retain) WAPhone *phone;
 @end
 
 @interface WAGroupInfo : NSObject
@@ -119,7 +117,6 @@ typedef NS_OPTIONS(NSUInteger, ProcessAssertionFlags)
 @end
 
 @interface WAMediaItem : NSObject
-@property(retain, nonatomic) NSNumber *mediaSaved;
 @property(retain, nonatomic) NSString *mediaLocalPath;
 @end
 
@@ -147,6 +144,7 @@ typedef NS_ENUM(NSInteger, WhatsAppMessageType) {
 
 @interface WAContactsStorage : NSObject
 - (NSArray *)favorites;
+- (WAFavorite *)favoriteWithObjectID:(NSManagedObjectID *)objectID;
 - (WAContact *)contactForJID:(NSString *)jid;
 - (WAPhone *)phoneWithObjectID:(NSManagedObjectID *)objectID;
 - (UIImage *)profilePictureForJID:(NSString *)jid;
@@ -159,8 +157,8 @@ typedef NS_ENUM(NSInteger, WhatsAppMessageType) {
 - (NSArray *)messagesForSession:(WAChatSession *)session startOffset:(NSUInteger)offset limit:(NSUInteger)limit;
 - (void)storeModifiedChatSession:(WAChatSession *)session;
 - (WAMessage *)messageWithText:(NSString *)text inChatSession:(WAChatSession *)chatSession isBroadcast:(BOOL)broadcast;
-- (WAMessage *)messageWithImage:(UIImage *)image inChatSession:(WAChatSession *)chatSession error:(NSError **)error;
-- (WAMessage *)messageWithMovieURL:(NSURL *)movieURL inChatSession:(WAChatSession *)chatSession copyFile:(BOOL)file error:(NSError **)error;
+- (void)sendMessageWithImage:(UIImage *)image ofIndex:(NSInteger)index totalCount:(NSUInteger)count inChatSession:(WAChatSession *)chatSession completion:(id)completion;
+- (void)sendVideoAtURL:(NSURL *)movieURL inChatSession:(WAChatSession *)chatSession completion:(id)completion;
 @end
 
 @interface ChatManager : NSObject
@@ -172,42 +170,19 @@ typedef NS_ENUM(NSInteger, WhatsAppMessageType) {
 #pragma mark - Globals
 
 static NSDictionary *userDefaults;
+static NSInteger socketPort;
+static BKSProcessAssertion *processAssertion; // Keep WhatsApp running and prevent it from suspended
+static CFSocketRef listeningSocket; // Use tcp socket as a workaround, since mach-register in sandboxed apps is not allowed in iOS 7
 static WAContactsStorage *contactsStorage;
 static WAChatStorage *chatStorage;
 
 #pragma mark - Functions
 
-static CFMessagePortRef remotePort()
-{
-    static CFMessagePortRef port;
-    if (!(port != NULL && CFMessagePortIsValid(port))) {
-        port = CFMessagePortCreateRemote(kCFAllocatorDefault, CFSTR(WhatsAppForCouriaIdentifier));
-    }
-    return port;
-}
-
-static BOOL appIsRunning()
-{
-    CFMessagePortRef port = remotePort();
-    return port != NULL && CFMessagePortIsValid(port);
-}
-
-static void launchApp()
-{
-    static BKSProcessAssertion *processAssertion;
-    if ([userDefaults[KeepAliveKey]boolValue] && !appIsRunning()) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^(void){
-            [[UIApplication sharedApplication]launchApplicationWithIdentifier:WhatsAppIdentifier suspended:YES];
-            processAssertion = [[BKSProcessAssertion alloc]initWithBundleIdentifier:WhatsAppIdentifier flags:(ProcessAssertionFlagPreventSuspend | ProcessAssertionFlagPreventThrottleDownCPU | ProcessAssertionFlagAllowIdleSleep | ProcessAssertionFlagWantsForegroundResourcePriority) reason:kProcessAssertionReasonBackgroundUI name:@WhatsAppForCouriaIdentifier withHandler:NULL];
-        });
-    }
-}
-
 static int PIDForProcessNamed(NSString *passedInProcessName)
 {
     int pid = 0;
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
-    size_t miblen = 4;
+    u_int miblen = 4;
     size_t size;
     int st = sysctl(mib, miblen, NULL, &size, NULL, 0);
     struct kinfo_proc * process = NULL;
@@ -226,9 +201,9 @@ static int PIDForProcessNamed(NSString *passedInProcessName)
     } while (st == -1 && errno == ENOMEM);
     if (st == 0) {
         if (size % sizeof(struct kinfo_proc) == 0) {
-            int nprocess = size / sizeof(struct kinfo_proc);
+            u_long nprocess = size / sizeof(struct kinfo_proc);
             if (nprocess) {
-                for (int i = nprocess - 1; i >= 0; i--) {
+                for (long i = nprocess - 1; i >= 0; i--) {
                     NSString * processName = [[NSString alloc] initWithFormat:@"%s", process[i].kp_proc.p_comm];
                     if ([processName rangeOfString:passedInProcessName].location != NSNotFound) {
                         pid = process[i].kp_proc.p_pid;
@@ -241,152 +216,98 @@ static int PIDForProcessNamed(NSString *passedInProcessName)
     return pid;
 }
 
+static inline BOOL appIsRunning()
+{
+    return (PIDForProcessNamed(@"WhatsApp") > 0);
+}
+
+static inline void launchApp()
+{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^(void){
+        [[UIApplication sharedApplication]launchApplicationWithIdentifier:WhatsAppIdentifier suspended:YES];
+    });
+}
+
+static BOOL readBytes(CFReadStreamRef readStream, void *buffer, NSUInteger length)
+{
+    NSUInteger read = 0;
+    while (read < length) {
+        NSInteger result = CFReadStreamRead(readStream, ((UInt8 *)buffer) + read, length - read);
+        if (result > 0) {
+            read += result;
+        } else {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+static BOOL writeBytes(CFWriteStreamRef writeStream, const void *bytes, NSUInteger length)
+{
+    NSUInteger written = 0;
+    while (written < length) {
+        NSInteger result = CFWriteStreamWrite(writeStream, ((const UInt8 *)bytes) + written, length - written);
+        if (result > 0) {
+            written += result;
+        } else {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+static NSData *sendMessage(CouriaWhatsAppServiceMessageID messageId, NSData *messageData)
+{
+    if (!appIsRunning()) {
+        return nil;
+    }
+    NSData *responseData = nil;
+    CFReadStreamRef readStream;
+    CFWriteStreamRef writeStream;
+    CFStreamCreatePairWithSocketToHost(kCFAllocatorDefault, CFSTR("127.0.0.1"), (UInt32)socketPort, &readStream, &writeStream);
+    if (readStream && writeStream) {
+        CFReadStreamOpen(readStream);
+        CFWriteStreamOpen(writeStream);
+        UInt64 messageLength = messageData.length;
+        BOOL writeDone =
+        writeBytes(writeStream, &messageId, sizeof(CouriaWhatsAppServiceMessageID)) &&
+        writeBytes(writeStream, &messageLength, sizeof(UInt64)) &&
+        writeBytes(writeStream, messageData.bytes, messageLength);
+        if (writeDone) {
+            UInt64 dataLength = 0;
+            if (readBytes(readStream, &dataLength, sizeof(UInt64))) {
+                void *buffer = malloc(dataLength);
+                if (buffer != NULL && readBytes(readStream, buffer, dataLength)) {
+                    responseData = [NSData dataWithBytesNoCopy:buffer length:dataLength freeWhenDone:YES];
+                }
+            }
+        }
+        CFReadStreamClose(readStream);
+        CFWriteStreamClose(writeStream);
+    }
+    if (readStream) {
+        CFRelease(readStream);
+    }
+    if (writeStream) {
+        CFRelease(writeStream);
+    }
+    return responseData ? : [NSData data];
+}
+
 static void userDefaultsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo)
 {
     userDefaults = [NSDictionary dictionaryWithContentsOfFile:UserDefaultsPlist];
-    launchApp();
+    socketPort = [userDefaults[SocketPortKey]integerValue];
+    if ([userDefaults[KeepAliveKey]boolValue]) {
+        launchApp();
+    }
 }
 
 static void applicationDidExitCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo)
 {
-    launchApp();
-}
-
-static CFDataRef messagePortCallback(CFMessagePortRef local, SInt32 messageId, CFDataRef data, void *info)
-{
-    CFDataRef returnData = NULL;
-    switch (messageId) {
-        case GetNickname: {
-            NSString *userIdentifier = [[NSString alloc]initWithData:(__bridge NSData *)data encoding:NSUTF8StringEncoding];
-            NSString *nickname = nil;
-            if ([userIdentifier hasSuffix:@"@g.us"]) {
-                nickname = [chatStorage existingChatSessionForJID:userIdentifier].partnerName;
-            } else {
-                nickname = [contactsStorage contactForJID:userIdentifier].fullName;
-            }
-            if (nickname == nil) {
-                nickname = userIdentifier;
-            }
-            returnData = (__bridge_retained CFDataRef)[nickname dataUsingEncoding:NSUTF8StringEncoding];
-            break;
-        }
-        case GetAvatar: {
-            NSString *userIdentifier = [[NSString alloc]initWithData:(__bridge NSData *)data encoding:NSUTF8StringEncoding];
-            UIImage *avatar = nil;
-            if ([userIdentifier hasSuffix:@"@g.us"]) {
-                avatar = [UIImage imageWithContentsOfFile:[[NSString stringWithFormat:@"~/Library/%@.thumb",[chatStorage existingChatSessionForJID:userIdentifier].groupInfo.picturePath]stringByExpandingTildeInPath]];
-                if (avatar == nil) {
-                    avatar = [UIImage imageNamed:@"GroupChat.png"];
-                }
-            } else {
-                avatar = [contactsStorage profilePictureForJID:userIdentifier];
-                if (avatar == nil) {
-                    avatar = [UIImage imageNamed:@"EmptyContact.png"];
-                }
-            }
-            returnData = (__bridge_retained CFDataRef)UIImagePNGRepresentation(avatar);
-            break;
-        }
-        case GetMessages: {
-            NSString *userIdentifier = [[NSString alloc]initWithData:(__bridge NSData *)data encoding:NSUTF8StringEncoding];
-            NSArray *messages = [chatStorage messagesForSession:[chatStorage existingChatSessionForJID:userIdentifier] startOffset:0 limit:15];
-            if (messages.count > 0) {
-                NSMutableArray *whatsappMessages = [NSMutableArray array];
-                for (WAMessage *message in messages) {
-                    if (message.groupEventType.integerValue != 0) {
-                        continue;
-                    }
-                    CouriaWhatsAppMessage *whatsappMessage = [[CouriaWhatsAppMessage alloc]init];
-                    switch (message.messageType.integerValue) {
-                        case TextMessage: {
-                            whatsappMessage.text = message.text;
-                            break;
-                        }
-                        case PhotoMessage: {
-                            WAMediaItem *mediaItem = message.mediaItem;
-                            if (mediaItem.mediaSaved.boolValue) {
-                                whatsappMessage.text = @"";
-                                whatsappMessage.media = [UIImage imageWithContentsOfFile:[[NSString stringWithFormat:@"~/Library/%@",mediaItem.mediaLocalPath]stringByExpandingTildeInPath]];
-                            } else {
-                                whatsappMessage.text = @"[Not Downloaded Photo]";
-                            }
-                            break;
-                        }
-                        case MovieMessage: {
-                            WAMediaItem *mediaItem = message.mediaItem;
-                            if (mediaItem.mediaSaved.boolValue) {
-                                whatsappMessage.text = @"";
-                                whatsappMessage.media = [NSURL fileURLWithPath:[[NSString stringWithFormat:@"~/Library/%@",mediaItem.mediaLocalPath]stringByExpandingTildeInPath]];
-                            } else {
-                                whatsappMessage.text = @"[Not Downloaded Movie]";
-                            }
-                            break;
-                        }
-                    }
-                    if (message.groupMember != nil) {
-                        whatsappMessage.text = [NSString stringWithFormat:@"%@: %@", message.groupMember.contactName, whatsappMessage.text];
-                    }
-                    whatsappMessage.outgoing = message.isFromMe.boolValue;
-                    [whatsappMessages insertObject:whatsappMessage atIndex:0];
-                }
-                returnData = (__bridge_retained CFDataRef)[NSKeyedArchiver archivedDataWithRootObject:whatsappMessages];
-            }
-            break;
-        }
-        case GetContacts: {
-            NSString *keyword = [[NSString alloc]initWithData:(__bridge NSData *)data encoding:NSUTF8StringEncoding];
-            NSMutableArray *contacts = [NSMutableArray array];
-            if (keyword.length == 0) {
-                NSArray *chatSessions = [chatStorage chatSessionsWithBroadcast:NO];
-                for (WAChatSession *chatSession in chatSessions) {
-                    [contacts addObject:chatSession.contactJID];
-                }
-            } else {
-                NSArray *favorites = contactsStorage.favorites;
-                for (NSDictionary *favorite in favorites) {
-                    WAPhone *phone = [contactsStorage phoneWithObjectID:favorite[@"objectID"]];
-                    NSString *fullName = phone.contact.fullName;
-                    NSString *whatsAppID = phone.whatsAppID;
-                    if ([fullName rangeOfString:keyword options:NSCaseInsensitiveSearch].location != NSNotFound || [whatsAppID rangeOfString:keyword options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                        [contacts addObject:[NSString stringWithFormat:@"%@@s.whatsapp.net", whatsAppID]];
-                    }
-                }
-            }
-            returnData = (__bridge_retained CFDataRef)[NSKeyedArchiver archivedDataWithRootObject:contacts];
-            break;
-        }
-        case SendMessage: {
-            NSDictionary *messageDictionary = [NSKeyedUnarchiver unarchiveObjectWithData:(__bridge NSData *)data];
-            NSString *userIdentifier = messageDictionary[UserIDKey];
-            CouriaWhatsAppMessage *message = messageDictionary[MessageKey];
-            NSString *text = message.text;
-            id media = message.media;
-            WAChatSession *chatSession = [chatStorage existingChatSessionForJID:userIdentifier];
-            if (chatSession == nil) {
-                WAContact *contact = [contactsStorage contactForJID:userIdentifier];
-                chatSession = [chatStorage createChatSessionForContact:contact JID:userIdentifier];
-            }
-            if (text.length > 0) {
-                [chatStorage messageWithText:text inChatSession:chatSession isBroadcast:NO];
-            }
-            if (media != nil) {
-                if ([media isKindOfClass:UIImage.class]) {
-                    [chatStorage messageWithImage:media inChatSession:chatSession error:nil];
-                } else if ([media isKindOfClass:NSURL.class]) {
-                    [chatStorage messageWithMovieURL:media inChatSession:chatSession copyFile:YES error:nil];
-                }
-            }
-            break;
-        }
-        case MarkRead: {
-            NSString *userIdentifier = [[NSString alloc]initWithData:(__bridge NSData *)data encoding:NSUTF8StringEncoding];
-            WAChatSession *chatSession = [chatStorage existingChatSessionForJID:userIdentifier];
-            chatSession.unreadCount = @(0);
-            [chatStorage storeModifiedChatSession:chatSession];
-            break;
-        }
+    if ([userDefaults[KeepAliveKey]boolValue]) {
+        launchApp();
     }
-    return returnData;
 }
 
 #pragma mark - Implementations
@@ -420,7 +341,16 @@ static CFDataRef messagePortCallback(CFMessagePortRef local, SInt32 messageId, C
 
 @end
 
-@implementation CouriaWhatsAppDataSource
+@implementation CouriaWhatsAppHandler
+
++ (instancetype)sharedInstance
+{
+    CouriaWhatsAppHandler *sharedInstance;
+    if (sharedInstance == nil) {
+        sharedInstance = [[CouriaWhatsAppHandler alloc]init];
+    }
+    return sharedInstance;
+}
 
 - (NSString *)getUserIdentifier:(BBBulletin *)bulletin
 {
@@ -448,10 +378,9 @@ static CFDataRef messagePortCallback(CFMessagePortRef local, SInt32 messageId, C
     if (!appIsRunning()) {
         return nil;
     }
-    CFDataRef data = (__bridge CFDataRef)[userIdentifier dataUsingEncoding:NSUTF8StringEncoding];
-    CFDataRef returnData = NULL;
-    CFMessagePortSendRequest(remotePort(), GetNickname, data, 30, 30, kCFRunLoopDefaultMode, &returnData);
-    NSString *nickname = [[NSString alloc]initWithData:(__bridge NSData *)returnData encoding:NSUTF8StringEncoding];
+
+    NSData *replyData = sendMessage(GetNickname, [userIdentifier dataUsingEncoding:NSUTF8StringEncoding]);
+    NSString *nickname = [[NSString alloc]initWithData:replyData encoding:NSUTF8StringEncoding];
     return nickname;
 }
 
@@ -460,10 +389,8 @@ static CFDataRef messagePortCallback(CFMessagePortRef local, SInt32 messageId, C
     if (!appIsRunning()) {
         return nil;
     }
-    CFDataRef data = (__bridge CFDataRef)[userIdentifier dataUsingEncoding:NSUTF8StringEncoding];
-    CFDataRef returnData = NULL;
-    CFMessagePortSendRequest(remotePort(), GetAvatar, data, 30, 30, kCFRunLoopDefaultMode, &returnData);
-    UIImage *avatar = [UIImage imageWithData:(__bridge NSData *)returnData];
+    NSData *replyData = sendMessage(GetAvatar, [userIdentifier dataUsingEncoding:NSUTF8StringEncoding]);
+    UIImage *avatar = [UIImage imageWithData:replyData];
     return avatar;
 }
 
@@ -472,10 +399,8 @@ static CFDataRef messagePortCallback(CFMessagePortRef local, SInt32 messageId, C
     if (!appIsRunning()) {
         return nil;
     }
-    CFDataRef data = (__bridge CFDataRef)[userIdentifier dataUsingEncoding:NSUTF8StringEncoding];
-    CFDataRef returnData = NULL;
-    CFMessagePortSendRequest(remotePort(), GetMessages, data, 30, 30, kCFRunLoopDefaultMode, &returnData);
-    NSArray *messages = [NSKeyedUnarchiver unarchiveObjectWithData:(__bridge NSData *)returnData];
+    NSData *replyData = sendMessage(GetMessages, [userIdentifier dataUsingEncoding:NSUTF8StringEncoding]);
+    NSArray *messages = [NSKeyedUnarchiver unarchiveObjectWithData:replyData];
     return messages;
 }
 
@@ -484,16 +409,10 @@ static CFDataRef messagePortCallback(CFMessagePortRef local, SInt32 messageId, C
     if (!appIsRunning()) {
         return nil;
     }
-    CFDataRef data = (__bridge CFDataRef)[keyword dataUsingEncoding:NSUTF8StringEncoding];
-    CFDataRef returnData = NULL;
-    CFMessagePortSendRequest(remotePort(), GetContacts, data, 30, 30, kCFRunLoopDefaultMode, &returnData);
-    NSArray *contacts = [NSKeyedUnarchiver unarchiveObjectWithData:(__bridge NSData *)returnData];
+    NSData *replyData = sendMessage(GetContacts, [keyword dataUsingEncoding:NSUTF8StringEncoding]);
+    NSArray *contacts = [NSKeyedUnarchiver unarchiveObjectWithData:replyData];
     return contacts;
 }
-
-@end
-
-@implementation CouriaWhatsAppDelegate
 
 - (void)sendMessage:(id<CouriaMessage>)message toUser:(NSString *)userIdentifier
 {
@@ -504,8 +423,8 @@ static CFDataRef messagePortCallback(CFMessagePortRef local, SInt32 messageId, C
     whatsappMessage.text = message.text;
     whatsappMessage.media = message.media;
     whatsappMessage.outgoing = message.outgoing;
-    CFDataRef data = (__bridge CFDataRef)[NSKeyedArchiver archivedDataWithRootObject:@{UserIDKey: userIdentifier, MessageKey: whatsappMessage}];
-    CFMessagePortSendRequest(remotePort(), SendMessage, data, 30, 30, NULL, NULL);
+    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:@{UserIDKey: userIdentifier, MessageKey: whatsappMessage}];
+    sendMessage(SendMessage, data);
 }
 
 - (void)markRead:(NSString *)userIdentifier
@@ -513,8 +432,8 @@ static CFDataRef messagePortCallback(CFMessagePortRef local, SInt32 messageId, C
     if (!appIsRunning()) {
         return;
     }
-    CFDataRef data = (__bridge CFDataRef)[userIdentifier dataUsingEncoding:NSUTF8StringEncoding];
-    CFMessagePortSendRequest(remotePort(), MarkRead, data, 30, 30, NULL, NULL);
+    NSData *data = [userIdentifier dataUsingEncoding:NSUTF8StringEncoding];
+    sendMessage(MarkRead, data);
 }
 
 - (BOOL)canSendPhoto
@@ -531,34 +450,231 @@ static CFDataRef messagePortCallback(CFMessagePortRef local, SInt32 messageId, C
 
 #pragma mark - Service
 
-@interface CouriaWhatsAppService : NSObject
-@end
-
-@implementation CouriaWhatsAppService
-
-+ (void)start
+static NSData *serviceCallback(CouriaWhatsAppServiceMessageID messageId, NSData *messageData)
 {
-    static CouriaWhatsAppService *service;
-    static CFMessagePortRef localPort;
-    if (service == nil) {
-        service = [[CouriaWhatsAppService alloc]init];
-        localPort = CFMessagePortCreateLocal(kCFAllocatorDefault, CFSTR(WhatsAppForCouriaIdentifier), messagePortCallback, NULL, NULL);
-        CFRunLoopSourceRef source = CFMessagePortCreateRunLoopSource(kCFAllocatorDefault, localPort, 0);
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
+    NSData *returnData = nil;
+    switch (messageId) {
+        case GetNickname: {
+            NSString *userIdentifier = [[NSString alloc]initWithData:messageData encoding:NSUTF8StringEncoding];
+            NSString *nickname = nil;
+            if ([userIdentifier hasSuffix:@"@g.us"]) {
+                nickname = [chatStorage existingChatSessionForJID:userIdentifier].partnerName;
+            } else {
+                nickname = [contactsStorage contactForJID:userIdentifier].fullName;
+            }
+            if (nickname == nil) {
+                nickname = userIdentifier;
+            }
+            returnData = [nickname dataUsingEncoding:NSUTF8StringEncoding];
+            break;
+        }
+        case GetAvatar: {
+            NSString *userIdentifier = [[NSString alloc]initWithData:messageData encoding:NSUTF8StringEncoding];
+            UIImage *avatar = nil;
+            if ([userIdentifier hasSuffix:@"@g.us"]) {
+                avatar = [UIImage imageWithContentsOfFile:[[NSString stringWithFormat:@"~/Library/%@.thumb",[chatStorage existingChatSessionForJID:userIdentifier].groupInfo.picturePath]stringByExpandingTildeInPath]];
+                if (avatar == nil) {
+                    avatar = [UIImage imageNamed:@"GroupChat.png"];
+                }
+            } else {
+                avatar = [contactsStorage profilePictureForJID:userIdentifier];
+                if (avatar == nil) {
+                    avatar = [UIImage imageNamed:@"EmptyContact.png"];
+                }
+            }
+            returnData = UIImagePNGRepresentation(avatar);
+            break;
+        }
+        case GetMessages: {
+            NSString *userIdentifier = [[NSString alloc]initWithData:messageData encoding:NSUTF8StringEncoding];
+            NSArray *messages = [chatStorage messagesForSession:[chatStorage existingChatSessionForJID:userIdentifier] startOffset:0 limit:15];
+            NSFileManager *fileManager = [NSFileManager defaultManager];
+            if (messages.count > 0) {
+                NSMutableArray *whatsappMessages = [NSMutableArray array];
+                for (WAMessage *message in messages) {
+                    if (message.groupEventType.integerValue != 0) {
+                        continue;
+                    }
+                    CouriaWhatsAppMessage *whatsappMessage = [[CouriaWhatsAppMessage alloc]init];
+                    switch (message.messageType.integerValue) {
+                        case TextMessage: {
+                            whatsappMessage.text = message.text;
+                            break;
+                        }
+                        case PhotoMessage: {
+                            WAMediaItem *mediaItem = message.mediaItem;
+                            NSString *fullPath = [[NSString stringWithFormat:@"~/Library/%@",mediaItem.mediaLocalPath]stringByExpandingTildeInPath];
+                            if ([fileManager fileExistsAtPath:fullPath]) {
+                                whatsappMessage.text = @"";
+                                whatsappMessage.media = [UIImage imageWithContentsOfFile:fullPath];
+                            } else {
+                                whatsappMessage.text = @"[Not Downloaded Photo]";
+                            }
+                            break;
+                        }
+                        case MovieMessage: {
+                            WAMediaItem *mediaItem = message.mediaItem;
+                            NSString *fullPath = [[NSString stringWithFormat:@"~/Library/%@",mediaItem.mediaLocalPath]stringByExpandingTildeInPath];
+                            if ([fileManager fileExistsAtPath:fullPath]) {
+                                whatsappMessage.text = @"";
+                                whatsappMessage.media = [NSURL fileURLWithPath:fullPath];
+                            } else {
+                                whatsappMessage.text = @"[Not Downloaded Movie]";
+                            }
+                            break;
+                        }
+                    }
+                    if (message.groupMember != nil) {
+                        whatsappMessage.text = [NSString stringWithFormat:@"%@: %@", message.groupMember.contactName, whatsappMessage.text];
+                    }
+                    whatsappMessage.outgoing = message.isFromMe.boolValue;
+                    [whatsappMessages insertObject:whatsappMessage atIndex:0];
+                }
+                returnData = [NSKeyedArchiver archivedDataWithRootObject:whatsappMessages];
+            }
+            break;
+        }
+        case GetContacts: {
+            NSString *keyword = [[NSString alloc]initWithData:messageData encoding:NSUTF8StringEncoding];
+            NSMutableArray *contacts = [NSMutableArray array];
+            if (keyword.length == 0) {
+                NSArray *chatSessions = [chatStorage chatSessionsWithBroadcast:NO];
+                for (WAChatSession *chatSession in chatSessions) {
+                    [contacts addObject:chatSession.contactJID];
+                }
+            } else {
+                NSArray *favorites = contactsStorage.favorites;
+                for (NSManagedObjectID *favoriteObjectId in favorites) {
+                    WAPhone *phone = [contactsStorage favoriteWithObjectID:favoriteObjectId].phone;
+                    NSString *fullName = phone.contact.fullName;
+                    NSString *whatsAppID = phone.whatsAppID;
+                    if ([fullName rangeOfString:keyword options:NSCaseInsensitiveSearch].location != NSNotFound || [whatsAppID rangeOfString:keyword options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                        [contacts addObject:[NSString stringWithFormat:@"%@@s.whatsapp.net", whatsAppID]];
+                    }
+                }
+            }
+            returnData = [NSKeyedArchiver archivedDataWithRootObject:contacts];
+            break;
+        }
+        case SendMessage: {
+            NSDictionary *messageDictionary = [NSKeyedUnarchiver unarchiveObjectWithData:messageData];
+            NSString *userIdentifier = messageDictionary[UserIDKey];
+            CouriaWhatsAppMessage *message = messageDictionary[MessageKey];
+            NSString *text = message.text;
+            id media = message.media;
+            WAChatSession *chatSession = [chatStorage existingChatSessionForJID:userIdentifier];
+            if (chatSession == nil) {
+                WAContact *contact = [contactsStorage contactForJID:userIdentifier];
+                chatSession = [chatStorage createChatSessionForContact:contact JID:userIdentifier];
+            }
+            if (text.length > 0) {
+                [chatStorage messageWithText:text inChatSession:chatSession isBroadcast:NO];
+            }
+            if (media != nil) {
+                if ([media isKindOfClass:UIImage.class]) {
+                    [chatStorage sendMessageWithImage:media ofIndex:0 totalCount:1 inChatSession:chatSession completion:^(void){}];
+                } else if ([media isKindOfClass:NSURL.class]) {
+                    [chatStorage sendVideoAtURL:media inChatSession:chatSession completion:^(void){}];
+                }
+            }
+            break;
+        }
+        case MarkRead: {
+            NSString *userIdentifier = [[NSString alloc]initWithData:messageData encoding:NSUTF8StringEncoding];
+            WAChatSession *chatSession = [chatStorage existingChatSessionForJID:userIdentifier];
+            chatSession.unreadCount = @(0);
+            [chatStorage storeModifiedChatSession:chatSession];
+            break;
+        }
+    }
+    return returnData ? : [NSData data];
+}
+
+static void socketCallBack(CFSocketRef s, CFSocketCallBackType type, CFDataRef address, const void *data, void *info)
+{
+    CFSocketNativeHandle socketHandle = *(CFSocketNativeHandle *)data;
+    CFReadStreamRef readStream = NULL;
+    CFWriteStreamRef writeStream = NULL;
+    CFStreamCreatePairWithSocket(kCFAllocatorDefault, socketHandle, &readStream, &writeStream);
+    if (readStream && writeStream) {
+        CFReadStreamOpen(readStream);
+        CFWriteStreamOpen(writeStream);
+        CouriaWhatsAppServiceMessageID messageId = -1;
+        UInt64 messageLength = 0;
+        NSData *messageData;
+        BOOL readDone = NO;
+        if (readBytes(readStream, &messageId, sizeof(CouriaWhatsAppServiceMessageID)) &&
+            readBytes(readStream, &messageLength, sizeof(UInt64))) {
+            void *buffer = malloc(messageLength);
+            if (buffer != NULL && readBytes(readStream, buffer, messageLength)) {
+                messageData = [NSData dataWithBytesNoCopy:buffer length:messageLength freeWhenDone:YES];
+                readDone = YES;
+            }
+        }
+        if (readDone) {
+            NSData *responseData = serviceCallback(messageId, messageData);
+            UInt64 dataLength = responseData.length;
+            writeBytes(writeStream, &dataLength, sizeof(UInt64));
+            writeBytes(writeStream, responseData.bytes, dataLength);
+        }
+        CFReadStreamClose(readStream);
+        CFWriteStreamClose(writeStream);
+    }
+    if (readStream) {
+        CFRelease(readStream);
+    }
+    if (writeStream) {
+        CFRelease(writeStream);
+    }
+    close(socketHandle);
+}
+
+static void CouriaWhatsAppServiceStart(void)
+{
+    processAssertion = [[BKSProcessAssertion alloc]initWithBundleIdentifier:WhatsAppIdentifier flags:(ProcessAssertionFlagPreventSuspend | ProcessAssertionFlagPreventThrottleDownCPU | ProcessAssertionFlagAllowIdleSleep | ProcessAssertionFlagWantsForegroundResourcePriority) reason:kProcessAssertionReasonBackgroundUI name:WhatsAppForCouriaIdentifier withHandler:NULL];
+
+    CFSocketRef socket = CFSocketCreate(kCFAllocatorDefault, AF_INET, SOCK_STREAM, IPPROTO_TCP, kCFSocketAcceptCallBack, &socketCallBack, NULL);
+    if (socket == NULL) {
+        return;
+    }
+    static const int yes = 1;
+    setsockopt(CFSocketGetNative(socket), SOL_SOCKET, SO_REUSEADDR, (const void *)&yes, sizeof(yes));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_len = sizeof(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(0);
+    addr.sin_addr.s_addr = htonl((u_int32_t)0x7F000001);
+    if (CFSocketSetAddress(socket, (__bridge CFDataRef)[NSData dataWithBytes:&addr length:sizeof(addr)]) != kCFSocketSuccess) {
+        CFSocketInvalidate(socket);
+        CFRelease(socket);
+        return;
+    }
+    NSUInteger port = ntohs(((const struct sockaddr_in *)CFDataGetBytePtr(CFSocketCopyAddress(socket)))->sin_port);
+    CFRunLoopSourceRef source = CFSocketCreateRunLoopSource(kCFAllocatorDefault, socket, 0);
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
+    CFRelease(source);
+    listeningSocket = socket;
+
+    NSMutableDictionary *userDefaults = [NSMutableDictionary dictionary];
+    [userDefaults addEntriesFromDictionary:[NSDictionary dictionaryWithContentsOfFile:UserDefaultsPlist]];
+    userDefaults[SocketPortKey] = @(port);
+    [userDefaults writeToFile:UserDefaultsPlist atomically:YES];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), UserDefaultsChangedNotification, NULL, NULL, TRUE);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^(void){
         ChatManager *chatManager = [NSClassFromString(@"ChatManager")sharedManager];
         contactsStorage = chatManager.contactsStorage;
         chatStorage = chatManager.storage;
-    }
+    });
 }
-
-@end
 
 #pragma mark - Hooks
 
 static int (*original_XPConnectionHasEntitlement)(id connection, NSString *entitlement);
 static int optimized_XPConnectionHasEntitlement(id connection, NSString *entitlement)
 {
-    if (xpc_connection_get_pid(connection) == PIDForProcessNamed(@"SpringBoard") && [entitlement isEqualToString:@"com.apple.multitasking.unlimitedassertions"]) {
+    if (xpc_connection_get_pid(connection) == PIDForProcessNamed(@"WhatsApp") && [entitlement isEqualToString:@"com.apple.multitasking.unlimitedassertions"]) {
         return 1;
     } else {
         return original_XPConnectionHasEntitlement(connection, entitlement);
@@ -582,7 +698,8 @@ CHConstructor
         NSString *applicationIdentifier = [NSBundle mainBundle].bundleIdentifier;
         if ([applicationIdentifier isEqualToString:SpringBoardIdentifier]) {
             Couria *couria = [NSClassFromString(@"Couria") sharedInstance];
-            [couria registerDataSource:[CouriaWhatsAppDataSource new] delegate:[CouriaWhatsAppDelegate new] forApplication:WhatsAppIdentifier];
+            CouriaWhatsAppHandler *handler = [CouriaWhatsAppHandler sharedInstance];
+            [couria registerDataSource:handler delegate:handler forApplication:WhatsAppIdentifier];
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, userDefaultsChangedCallback, UserDefaultsChangedNotification, NULL, CFNotificationSuspensionBehaviorCoalesce);
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, applicationDidExitCallback, ApplicationDidExitNotification, NULL, CFNotificationSuspensionBehaviorCoalesce);
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), UserDefaultsChangedNotification, NULL, NULL, TRUE);
@@ -592,7 +709,7 @@ CHConstructor
             CHLoadLateClass(BKWorkspaceServer);
             CHHook(2, BKWorkspaceServer, applicationDidExit, withInfo);
         } else if ([applicationIdentifier isEqualToString:WhatsAppIdentifier]) {
-            [CouriaWhatsAppService start];
+            CouriaWhatsAppServiceStart();
         }
     }
 }

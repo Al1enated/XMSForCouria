@@ -1,6 +1,6 @@
 Package: me.qusic.whatsappforcouria
 Name: WhatsApp for Couria
-Version: 0.1-1
+Version: 0.2
 Description: WhatsApp Extension for Couria
 Section: Tweaks
 Installed-Size: 0
@@ -12,3 +12,4 @@ Maintainer: Qusic <QusicS@Me.com>
 Sponsor: Qusic.me <http://Qusic.me>
 Homepage: http://Qusic.me/Couria
 Tag: purpose::extension
+Depiction: http://Cydia.Qusic.me/htmls/whatsappforcouria.html
