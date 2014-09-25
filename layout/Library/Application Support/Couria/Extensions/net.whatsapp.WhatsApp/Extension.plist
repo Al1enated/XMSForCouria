@@ -13,8 +13,6 @@
 			<string>Everything only works when XMS is running in the background. You can manually launch XMS yourself or turn on this option to make sure it is always running.
 If you are using any tweaks that kill background apps automatically, please exclude XMS.
 
-This is a more serious example extension for Couria. Source code available on Github (https://github.com/Qusic/WhatsAppForCouria).
-
 If you like my work, please consider donating. ;)</string>
 		</dict>
 		<dict>
