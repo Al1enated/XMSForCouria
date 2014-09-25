@@ -6,19 +6,19 @@
 #import <sys/socket.h>
 #import <netinet/in.h>
 
-#define WhatsAppForCouriaIdentifier @"me.qusic.whatsappforcouria"
+#define XMSForCouriaIdentifier @"me.qusic.xmsforcouria"
 #define SpringBoardIdentifier @"com.apple.springboard"
 #define BackBoardIdentifier @"com.apple.backboardd"
-#define WhatsAppIdentifier @"net.whatsapp.WhatsApp"
-#define UserDefaultsPlist @"/var/mobile/Library/Preferences/me.qusic.whatsappforcouria.plist"
-#define UserDefaultsChangedNotification CFSTR("me.qusic.whatsappforcouria.UserDefaultsChanged")
-#define ApplicationDidExitNotification CFSTR("me.qusic.whatsappforcouria.ApplicationDidExit")
+#define XMSIdentifier @"net.xms.XMS"
+#define UserDefaultsPlist @"/var/mobile/Library/Preferences/me.qusic.xmsforcouria.plist"
+#define UserDefaultsChangedNotification CFSTR("me.qusic.xmsforcouria.UserDefaultsChanged")
+#define ApplicationDidExitNotification CFSTR("me.qusic.xmsforcouria.ApplicationDidExit")
 #define UserIDKey @"UserID"
 #define MessageKey @"Message"
 #define KeepAliveKey @"KeepAlive"
 #define SocketPortKey @"Temp"
 
-typedef NS_ENUM(SInt8, CouriaWhatsAppServiceMessageID) {
+typedef NS_ENUM(SInt8, CouriaXMSServiceMessageID) {
     GetNickname,
     GetAvatar,
     GetMessages,
@@ -29,13 +29,13 @@ typedef NS_ENUM(SInt8, CouriaWhatsAppServiceMessageID) {
 
 #pragma mark - Headers
 
-@interface CouriaWhatsAppMessage : NSObject <CouriaMessage, NSSecureCoding>
+@interface CouriaXMSMessage : NSObject <CouriaMessage, NSSecureCoding>
 @property(retain) NSString *text;
 @property(retain) id media;
 @property(assign) BOOL outgoing;
 @end
 
-@interface CouriaWhatsAppHandler : NSObject <CouriaDataSource, CouriaDelegate>
+@interface CouriaXMSHandler : NSObject <CouriaDataSource, CouriaDelegate>
 + (instancetype)sharedInstance;
 @end
 
@@ -218,13 +218,13 @@ static int PIDForProcessNamed(NSString *passedInProcessName)
 
 static inline BOOL appIsRunning()
 {
-    return (PIDForProcessNamed(@"WhatsApp") > 0);
+    return (PIDForProcessNamed(@"XMS") > 0);
 }
 
 static inline void launchApp()
 {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^(void){
-        [[UIApplication sharedApplication]launchApplicationWithIdentifier:WhatsAppIdentifier suspended:YES];
+        [[UIApplication sharedApplication]launchApplicationWithIdentifier:XMSIdentifier suspended:YES];
     });
 }
 
@@ -256,7 +256,7 @@ static BOOL writeBytes(CFWriteStreamRef writeStream, const void *bytes, NSUInteg
     return YES;
 }
 
-static NSData *sendMessage(CouriaWhatsAppServiceMessageID messageId, NSData *messageData)
+static NSData *sendMessage(CouriaMXSServiceMessageID messageId, NSData *messageData)
 {
     if (!appIsRunning()) {
         return nil;
@@ -312,7 +312,7 @@ static void applicationDidExitCallback(CFNotificationCenterRef center, void *obs
 
 #pragma mark - Implementations
 
-@implementation CouriaWhatsAppMessage
+@implementation CouriaXMSMessage
 
 - (id)initWithCoder:(NSCoder *)aDecoder
 {
@@ -341,13 +341,13 @@ static void applicationDidExitCallback(CFNotificationCenterRef center, void *obs
 
 @end
 
-@implementation CouriaWhatsAppHandler
+@implementation CouriaXMSHandler
 
 + (instancetype)sharedInstance
 {
-    CouriaWhatsAppHandler *sharedInstance;
+    CouriaXMSHandler *sharedInstance;
     if (sharedInstance == nil) {
-        sharedInstance = [[CouriaWhatsAppHandler alloc]init];
+        sharedInstance = [[CouriaXMSHandler alloc]init];
     }
     return sharedInstance;
 }
@@ -419,11 +419,11 @@ static void applicationDidExitCallback(CFNotificationCenterRef center, void *obs
     if (!appIsRunning()) {
         return;
     }
-    CouriaWhatsAppMessage *whatsappMessage = [[CouriaWhatsAppMessage alloc]init];
-    whatsappMessage.text = message.text;
-    whatsappMessage.media = message.media;
-    whatsappMessage.outgoing = message.outgoing;
-    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:@{UserIDKey: userIdentifier, MessageKey: whatsappMessage}];
+    CouriaXMSMessage *xmsMessage = [[CouriaXMSMessage alloc]init];
+    xmsMessage.text = message.text;
+    xmsMessage.media = message.media;
+    xmsMessage.outgoing = message.outgoing;
+    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:@{UserIDKey: userIdentifier, MessageKey: xmsMessage}];
     sendMessage(SendMessage, data);
 }
 
@@ -490,25 +490,25 @@ static NSData *serviceCallback(CouriaWhatsAppServiceMessageID messageId, NSData 
             NSArray *messages = [chatStorage messagesForSession:[chatStorage existingChatSessionForJID:userIdentifier] startOffset:0 limit:15];
             NSFileManager *fileManager = [NSFileManager defaultManager];
             if (messages.count > 0) {
-                NSMutableArray *whatsappMessages = [NSMutableArray array];
+                NSMutableArray *xmsMessages = [NSMutableArray array];
                 for (WAMessage *message in messages) {
                     if (message.groupEventType.integerValue != 0) {
                         continue;
                     }
-                    CouriaWhatsAppMessage *whatsappMessage = [[CouriaWhatsAppMessage alloc]init];
+                    CouriaXMSMessage *xmsMessage = [[CouriaXMSMessage alloc]init];
                     switch (message.messageType.integerValue) {
                         case TextMessage: {
-                            whatsappMessage.text = message.text;
+                            XMSMessage.text = message.text;
                             break;
                         }
                         case PhotoMessage: {
                             WAMediaItem *mediaItem = message.mediaItem;
                             NSString *fullPath = [[NSString stringWithFormat:@"~/Library/%@",mediaItem.mediaLocalPath]stringByExpandingTildeInPath];
                             if ([fileManager fileExistsAtPath:fullPath]) {
-                                whatsappMessage.text = @"";
-                                whatsappMessage.media = [UIImage imageWithContentsOfFile:fullPath];
+                                xmsMessage.text = @"";
+                                xmsMessage.media = [UIImage imageWithContentsOfFile:fullPath];
                             } else {
-                                whatsappMessage.text = @"[Not Downloaded Photo]";
+                                xmsMessage.text = @"[Not Downloaded Photo]";
                             }
                             break;
                         }
@@ -516,21 +516,21 @@ static NSData *serviceCallback(CouriaWhatsAppServiceMessageID messageId, NSData 
                             WAMediaItem *mediaItem = message.mediaItem;
                             NSString *fullPath = [[NSString stringWithFormat:@"~/Library/%@",mediaItem.mediaLocalPath]stringByExpandingTildeInPath];
                             if ([fileManager fileExistsAtPath:fullPath]) {
-                                whatsappMessage.text = @"";
-                                whatsappMessage.media = [NSURL fileURLWithPath:fullPath];
+                                xmsMessage.text = @"";
+                                xmsMessage.media = [NSURL fileURLWithPath:fullPath];
                             } else {
-                                whatsappMessage.text = @"[Not Downloaded Movie]";
+                                xmsMessage.text = @"[Not Downloaded Movie]";
                             }
                             break;
                         }
                     }
                     if (message.groupMember != nil) {
-                        whatsappMessage.text = [NSString stringWithFormat:@"%@: %@", message.groupMember.contactName, whatsappMessage.text];
+                        xmsMessage.text = [NSString stringWithFormat:@"%@: %@", message.groupMember.contactName, xmsMessage.text];
                     }
-                    whatsappMessage.outgoing = message.isFromMe.boolValue;
-                    [whatsappMessages insertObject:whatsappMessage atIndex:0];
+                    xmsMessage.outgoing = message.isFromMe.boolValue;
+                    [xmsMessages insertObject:xmsMessage atIndex:0];
                 }
-                returnData = [NSKeyedArchiver archivedDataWithRootObject:whatsappMessages];
+                returnData = [NSKeyedArchiver archivedDataWithRootObject:xmsMessages];
             }
             break;
         }
@@ -559,7 +559,7 @@ static NSData *serviceCallback(CouriaWhatsAppServiceMessageID messageId, NSData 
         case SendMessage: {
             NSDictionary *messageDictionary = [NSKeyedUnarchiver unarchiveObjectWithData:messageData];
             NSString *userIdentifier = messageDictionary[UserIDKey];
-            CouriaWhatsAppMessage *message = messageDictionary[MessageKey];
+            CouriaXMSMessage *message = messageDictionary[MessageKey];
             NSString *text = message.text;
             id media = message.media;
             WAChatSession *chatSession = [chatStorage existingChatSessionForJID:userIdentifier];
@@ -629,9 +629,9 @@ static void socketCallBack(CFSocketRef s, CFSocketCallBackType type, CFDataRef a
     close(socketHandle);
 }
 
-static void CouriaWhatsAppServiceStart(void)
+static void CouriaXMSServiceStart(void)
 {
-    processAssertion = [[BKSProcessAssertion alloc]initWithBundleIdentifier:WhatsAppIdentifier flags:(ProcessAssertionFlagPreventSuspend | ProcessAssertionFlagPreventThrottleDownCPU | ProcessAssertionFlagAllowIdleSleep | ProcessAssertionFlagWantsForegroundResourcePriority) reason:kProcessAssertionReasonBackgroundUI name:WhatsAppForCouriaIdentifier withHandler:NULL];
+    processAssertion = [[BKSProcessAssertion alloc]initWithBundleIdentifier:WhatsAppIdentifier flags:(ProcessAssertionFlagPreventSuspend | ProcessAssertionFlagPreventThrottleDownCPU | ProcessAssertionFlagAllowIdleSleep | ProcessAssertionFlagWantsForegroundResourcePriority) reason:kProcessAssertionReasonBackgroundUI name:XMSForCouriaIdentifier withHandler:NULL];
 
     CFSocketRef socket = CFSocketCreate(kCFAllocatorDefault, AF_INET, SOCK_STREAM, IPPROTO_TCP, kCFSocketAcceptCallBack, &socketCallBack, NULL);
     if (socket == NULL) {
@@ -698,8 +698,8 @@ CHConstructor
         NSString *applicationIdentifier = [NSBundle mainBundle].bundleIdentifier;
         if ([applicationIdentifier isEqualToString:SpringBoardIdentifier]) {
             Couria *couria = [NSClassFromString(@"Couria") sharedInstance];
-            CouriaWhatsAppHandler *handler = [CouriaWhatsAppHandler sharedInstance];
-            [couria registerDataSource:handler delegate:handler forApplication:WhatsAppIdentifier];
+            CouriaXMSHandler *handler = [CouriaXMSHandler sharedInstance];
+            [couria registerDataSource:handler delegate:handler forApplication:XMSIdentifier];
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, userDefaultsChangedCallback, UserDefaultsChangedNotification, NULL, CFNotificationSuspensionBehaviorCoalesce);
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, applicationDidExitCallback, ApplicationDidExitNotification, NULL, CFNotificationSuspensionBehaviorCoalesce);
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), UserDefaultsChangedNotification, NULL, NULL, TRUE);
@@ -709,7 +709,7 @@ CHConstructor
             CHLoadLateClass(BKWorkspaceServer);
             CHHook(2, BKWorkspaceServer, applicationDidExit, withInfo);
         } else if ([applicationIdentifier isEqualToString:WhatsAppIdentifier]) {
-            CouriaWhatsAppServiceStart();
+            CouriaXMSServiceStart();
         }
     }
 }
