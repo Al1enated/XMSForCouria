@@ -1,15 +1,15 @@
-Package: me.qusic.whatsappforcouria
-Name: WhatsApp for Couria
+Package: me.qusic.XMSForCouria
+Name: XMS for Couria
 Version: 0.2
-Description: WhatsApp Extension for Couria
+Description: XMS Extension for Couria
 Section: Tweaks
 Installed-Size: 0
 Depends: firmware (>= 6.0), mobilesubstrate, me.qusic.couria
 Priority: optional
 Architecture: iphoneos-arm
-Author: Qusic <QusicS@Me.com>
-Maintainer: Qusic <QusicS@Me.com>
+Author: Al1enated <alienated@planetmail.com>
+Maintainer: Al1enated <Alienated@planetmail.com>
 Sponsor: Qusic.me <http://Qusic.me>
 Homepage: http://Qusic.me/Couria
 Tag: purpose::extension
-Depiction: http://Cydia.Qusic.me/htmls/whatsappforcouria.html
+Depiction: http://Cydia.Qusic.me/htmls/XMSForCouria.html
