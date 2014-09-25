@@ -1,8 +1,8 @@
-TWEAK_NAME = WhatsAppForCouria
-WhatsAppForCouria_FILES = Tweak.mm
-WhatsAppForCouria_FRAMEWORKS = UIKit
-WhatsAppForCouria_PRIVATE_FRAMEWORKS = BackBoardServices
-WhatsAppForCouria_LIBRARIES = substrate
+TWEAK_NAME = XMSForCouria
+XMSForCouria_FILES = Tweak.mm
+XMSForCouria_FRAMEWORKS = UIKit
+XMSForCouria_PRIVATE_FRAMEWORKS = BackBoardServices
+XMSForCouria_LIBRARIES = substrate
 
 export TARGET=iphone:clang
 export ARCHS = armv7 armv7s arm64
